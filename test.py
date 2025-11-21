@@ -16,6 +16,8 @@ from utils import make_coord
 from torchvision.utils import save_image
 
 import torch.nn.functional as F
+import pprint  # <--- Add this import
+
 torch.backends.cudnn.enabled = False
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:2048'
 
@@ -39,7 +41,8 @@ def batched_predict(model, inp, coord, scale, cell, bsize):
         preds = []
         while ql < n:
             qr = min(ql + bsize, n)
-            pred = model.query_rgb(coord[:, ql: qr, :].contiguous(), scale.contiguous(), cell[:, ql: qr, :].contiguous())
+            pred = model.query_rgb(coord[:, ql: qr, :].contiguous(), scale.contiguous(),
+                                   cell[:, ql: qr, :].contiguous())
             preds.append(pred)
             ql = qr
         pred = torch.cat(preds, dim=1)
@@ -78,19 +81,26 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
     pbar = tqdm(loader, leave=False, desc='val')
     IDX = 1
 
+    # --- FIX START: Create output directory if it doesn't exist ---
+    output_dir = 'output/experiment'  # Changed from absolute path '/output/experiment' to relative path
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created directory: {output_dir}")
+    # --- FIX END ---
+
     for batch in pbar:
-        
+
         for k, v in batch.items():
             batch[k] = v.cuda()
-            
+
         inp = (batch['inp'] - inp_sub) / inp_div
         gt = (batch['gt'] - gt_sub) / gt_div
         scale = batch['scale']
         scale = scale.item()
-        
+
         lr_bicubic = F.interpolate(batch['inp'], size=batch['gt'].shape[2:], mode='bicubic', align_corners=False)
         lr_bicubic = np.squeeze(lr_bicubic, axis=0)
-        
+
         # SwinIR Evaluation - reflection padding
         if window_size != 0:
             _, _, h_old, w_old = inp.size()
@@ -98,15 +108,15 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
             w_pad = (w_old // window_size + 1) * window_size - w_old
             inp = torch.cat([inp, torch.flip(inp, [2])], 2)[:, :, :h_old + h_pad, :]
             inp = torch.cat([inp, torch.flip(inp, [3])], 3)[:, :, :, :w_old + w_pad]
-            
-            coord = utils.make_coord((scale*(h_old+h_pad), scale*(w_old+w_pad))).unsqueeze(0).cuda()
+
+            coord = utils.make_coord((scale * (h_old + h_pad), scale * (w_old + w_pad))).unsqueeze(0).cuda()
             cell = torch.ones_like(coord)
             cell[:, :, 0] *= 2 / inp.shape[-2] / scale
             cell[:, :, 1] *= 2 / inp.shape[-1] / scale
         else:
             h_pad = 0
             w_pad = 0
-        
+
         if eval_bsize is None:
             with torch.no_grad():
                 pred = model(inp, batch['scale'])
@@ -114,15 +124,17 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
             pred = batched_predict(model, inp, batch['scale'], batch['cell'], eval_bsize)
 
         pred = pred * gt_div + gt_sub
-        
+
         pred.clamp_(0, 1)
-        save_image(pred, f'/output/experiment/output_image_{IDX}.png')
+        # Changed path to use os.path.join and relative path
+        save_image(pred, os.path.join(output_dir, f'output_image_{IDX}.png'))
 
         gt = np.squeeze(batch['gt'], axis=0).cuda()
-        
-        save_image(gt, f'/output/experiment/gt_{IDX}.png')
-        IDX = IDX+1
-        
+
+        # Changed path to use os.path.join and relative path
+        save_image(gt, os.path.join(output_dir, f'gt_{IDX}.png'))
+        IDX = IDX + 1
+
         res = metric_fn(pred, gt)
 
         val_res.add(res.item())
@@ -131,7 +143,8 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
             pbar.set_description('val {:.4f}'.format(val_res.item()))
 
     return val_res.item()
-                  
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config')
@@ -157,16 +170,17 @@ if __name__ == '__main__':
     dataset = datasets.make(spec['dataset'])
     dataset = datasets.make(spec['wrapper'], args={'dataset': dataset})
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
-        num_workers=1, pin_memory=True)
-    
+                        num_workers=1, pin_memory=True)
+
     model_args = {"num_points": args.num_points, "BLOCK_H": args.BLOCK_H, "BLOCK_W": args.BLOCK_W}
 
     model_spec = torch.load(args.model)['model']
+
     model = models.make(model_spec, model_args, load_sd=True).cuda()
 
     res = eval_psnr(loader, model,
-        data_norm=config.get('data_norm'),
-        eval_type=config.get('eval_type'),
-        eval_bsize=config.get('eval_bsize'),
-        verbose=True)
+                    data_norm=config.get('data_norm'),
+                    eval_type=config.get('eval_type'),
+                    eval_bsize=config.get('eval_bsize'),
+                    verbose=True)
     print('result: {:.4f}'.format(res))
